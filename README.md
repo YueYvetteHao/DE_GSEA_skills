@@ -157,7 +157,8 @@ skills/
 
 ## Author & license
 
-Created by **Yue Hao**. Released for public use — add a `LICENSE` file (e.g. MIT)
-before publishing if you want to set explicit terms.
+Created by **Yue Hao**.
+
+MIT LICENSE
 
 Contributions and issues welcome.
