@@ -1,0 +1,159 @@
+---
+title: "DESeq2 + GSEA Analysis Report"
+author: "Yue Hao"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+geometry: margin=2.5cm
+header-includes:
+  - \usepackage{float}
+  - \usepackage{longtable}
+  - \usepackage{booktabs}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "95%", fig.pos = "H")
+suppressPackageStartupMessages({ library(knitr); library(readxl) })
+source("config.R"); cfg <- config
+od <- cfg$output_dir; P <- cfg$project_name
+img  <- function(name) { f <- file.path(od, name); if (file.exists(f)) knitr::include_graphics(f) }
+has  <- function(name) file.exists(file.path(od, name))
+read_any <- function(f) {
+  ext <- tolower(tools::file_ext(f))
+  d <- if (ext %in% c("xlsx","xls")) as.data.frame(readxl::read_excel(f), check.names = FALSE)
+       else if (ext == "csv") read.csv(f, check.names = FALSE) else read.delim(f, check.names = FALSE)
+  colnames(d) <- sub("^﻿", "", colnames(d)); d
+}
+```
+
+```{r load}
+# Group labels / contrast direction
+if (cfg$group_mode == "threshold") {
+  test <- cfg$low_label; ref <- cfg$high_label
+} else { ref <- cfg$reference_group; test <- setdiff(cfg$group_levels, ref)[1] }
+
+de <- read.csv(file.path(od, paste0(P, "_DE_results.csv")))
+n_sig <- sum(de$padj < 0.05, na.rm = TRUE)
+n_up  <- sum(de$padj < 0.05 & de$log2FoldChange > 0, na.rm = TRUE)
+n_dn  <- sum(de$padj < 0.05 & de$log2FoldChange < 0, na.rm = TRUE)
+
+gsea_rows <- lapply(cfg$gene_set_collections, function(cl) {
+  f <- file.path(od, paste0(P, "_GSEA_", cl$name, ".csv")); if (!file.exists(f)) return(NULL)
+  g <- read.csv(f)
+  data.frame(Collection = cl$name, `Gene sets` = nrow(g),
+             `Sig (padj<0.05)` = sum(g$p.adjust < 0.05),
+             `Up (test)` = sum(g$p.adjust < 0.05 & g$NES > 0),
+             `Down (ref)` = sum(g$p.adjust < 0.05 & g$NES < 0), check.names = FALSE)
+})
+gsea_summary <- do.call(rbind, gsea_rows)
+```
+
+\newpage
+
+# Overview
+
+This report compares **`r test`** vs **`r ref`** samples in the `r P` dataset.
+Differential expression used DESeq2 (`~ Group`, **`r ref` as reference**), so a
+**positive** log~2~ fold-change / GSEA NES means **higher in `r test`**. Genes
+were ranked by the DESeq2 `r cfg$rank_metric` and tested against MSigDB gene sets
+(`r cfg$species`).
+
+```{r cohort-text, results="asis"}
+if (cfg$group_mode == "threshold") {
+  cat("Samples were classified as **", test, "** if ", cfg$value_col_pattern,
+      " $\\le$ ", cfg$threshold, " ", cfg$value_units, ", otherwise **", ref, "**.\n", sep = "")
+}
+```
+
+# Data summary
+
+```{r data-summary, results="asis"}
+if (cfg$group_mode == "threshold" && nchar(cfg$metadata_file) && file.exists(cfg$metadata_file)) {
+  sens <- read_any(cfg$metadata_file)
+  vcol <- grep(cfg$value_col_pattern, colnames(sens), ignore.case = TRUE, value = TRUE)[1]
+  sens$Value <- suppressWarnings(as.numeric(sens[[vcol]]))
+  sens <- sens[!is.na(sens$Value), ]
+  sens$Group <- ifelse(sens$Value <= cfg$threshold, cfg$low_label, cfg$high_label)
+  tab <- sens[order(sens$Value), c(cfg$sample_id_col, "Value", "Group")]
+  colnames(tab) <- c("Sample", paste0(cfg$value_col_pattern, " (", cfg$value_units, ")"), "Group")
+  cat("Table \\ref{tab:val} lists each sample, its value, and assigned group.\n\n")
+  print(kable(tab, row.names = FALSE, booktabs = TRUE, longtable = TRUE,
+              caption = "\\label{tab:val}Samples ordered by value."))
+}
+```
+
+# Differential expression
+
+Of `r format(nrow(de), big.mark=",")` tested genes, **`r n_sig`** were significant
+(padj < 0.05): `r n_up` higher in `r test`, `r n_dn` higher in `r ref`.
+
+```{r topde}
+td <- head(de[order(de$padj), ], 15)
+kable(data.frame(Gene = td$GeneName, log2FC = round(td$log2FoldChange, 2),
+                 stat = round(td$stat, 2), padj = signif(td$padj, 3)),
+      row.names = FALSE, booktabs = TRUE,
+      caption = "Top 15 differentially expressed genes (by padj).")
+```
+
+```{r de-figs, fig.cap=c("Volcano plot (positive log2FC = higher in the test group).","Top 40 DE genes (20 up / 20 down), variance-stabilized and z-scored.")}
+img(paste0(P, "_volcano.png"))
+img(paste0(P, "_top40_heatmap.png"))
+```
+
+# Pathway enrichment (GSEA)
+
+```{r gsea-sum}
+if (!is.null(gsea_summary))
+  kable(gsea_summary, row.names = FALSE, booktabs = TRUE,
+        caption = "GSEA results per MSigDB collection (padj < 0.05).")
+```
+
+```{r gsea-top, results="asis"}
+for (cl in cfg$gene_set_collections) {
+  f <- file.path(od, paste0(P, "_GSEA_", cl$name, ".csv")); if (!file.exists(f)) next
+  g <- read.csv(f); g <- head(g[order(g$p.adjust), ], 8)
+  cat("\n\n## ", cl$name, "\n\n")
+  print(kable(data.frame(Pathway = substr(gsub("_", " ", g$ID), 1, 58),
+                         NES = round(g$NES, 2), padj = signif(g$p.adjust, 3),
+                         Dir = ifelse(g$NES > 0, "test", "ref")),
+              row.names = FALSE, booktabs = TRUE,
+              caption = paste0("Top enriched ", cl$name, " gene sets.")))
+  bar <- paste0(P, "_GSEA_", cl$name, "_barplot.png")
+  if (has(bar)) { cat("\n\n"); print(img(bar)) }
+}
+```
+
+```{r sig-section, results="asis", eval=length(cfg$signature_terms) > 0}
+sig <- gsub("[^A-Za-z0-9]+", "_", cfg$signature_label)
+sigf <- file.path(od, paste0(P, "_", sig, "_signature.csv"))
+if (file.exists(sigf)) {
+  cat("\n\n# ", cfg$signature_label, " analysis\n\n")
+  s <- read.csv(sigf)
+  print(kable(data.frame(Pathway = substr(gsub("_", " ", s$ID), 1, 52),
+                         NES = round(s$NES, 2), padj = signif(s$p.adjust, 3),
+                         `Rank (padj)` = s$rank_by_padj, check.names = FALSE),
+              row.names = FALSE, booktabs = TRUE,
+              caption = paste0(cfg$signature_label, " gene sets in the current GSEA.")))
+  cat("\n\nAll significant (padj<0.05): **", all(s$p.adjust < 0.05), "**. ",
+      "Positive NES = enriched in the ", test, " group.\n\n", sep = "")
+  for (im in c(paste0(P, "_", sig, "_gseaplot.png"), paste0(P, "_", sig, "_ssgsea_heatmap.png")))
+    if (has(im)) print(img(im))
+}
+```
+
+# General findings
+
+- Contrast: **`r test` vs `r ref`** (reference = `r ref`).
+- **`r n_sig`** genes differentially expressed (padj < 0.05): `r n_up` up in
+  `r test`, `r n_dn` up in `r ref`.
+- See the GSEA tables above for the enriched programs in each direction.
+
+\vspace{1em}
+
+*Generated from the DE + GSEA + report skills; `config.R` controls all inputs and
+parameters. Re-running the skill scripts reproduces this report for any project.*
