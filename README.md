@@ -160,5 +160,3 @@ skills/
 Created by **Yue Hao**.
 
 MIT LICENSE.
-
-Contributions and issues welcome.
